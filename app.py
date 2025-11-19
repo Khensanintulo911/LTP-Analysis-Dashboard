@@ -10,37 +10,26 @@ st.title("🔧 LTP Analysis Dashboard")
 st.markdown("Upload your repair shop data to analyze Long Time Pending (LTP) appliances")
 
 LTP_THRESHOLDS = {
-    'phone': 3,
-    'fridge': 7,
-    'refrigerator': 7,
-    'washing machine': 4,
-    'washer': 4,
-    'dryer': 4,
-    'microwave': 4,
-    'oven': 4,
-    'dishwasher': 4,
-    'tv': 4,
-    'television': 4,
-    'laptop': 3,
-    'computer': 3,
-    'tablet': 3,
+    'HA': 7,
+    'DTV': 7,
+    'HHP': 4,
     'default': 4
 }
 
-def get_ltp_threshold(appliance_type):
-    if pd.isna(appliance_type):
+def get_ltp_threshold(model_code):
+    if pd.isna(model_code):
         return LTP_THRESHOLDS['default']
     
-    appliance_lower = str(appliance_type).lower().strip()
+    model_upper = str(model_code).upper().strip()
     
-    for key, threshold in LTP_THRESHOLDS.items():
-        if key in appliance_lower:
+    for code, threshold in LTP_THRESHOLDS.items():
+        if code in model_upper:
             return threshold
     
     return LTP_THRESHOLDS['default']
 
 def detect_date_column(df):
-    date_keywords = ['date', 'intake', 'received', 'started', 'created', 'opened', 'submitted']
+    date_keywords = ['requested date', 'request date', 'date', 'intake', 'received', 'started', 'created', 'opened', 'submitted']
     
     for col in df.columns:
         col_lower = str(col).lower()
@@ -56,12 +45,22 @@ def detect_date_column(df):
     
     return None
 
-def detect_appliance_column(df):
-    appliance_keywords = ['appliance', 'type', 'device', 'product', 'item', 'category']
+def detect_model_code_column(df):
+    model_keywords = ['model', 'code', 'model code', 'type', 'category', 'appliance type']
     
     for col in df.columns:
         col_lower = str(col).lower()
-        if any(keyword in col_lower for keyword in appliance_keywords):
+        if any(keyword in col_lower for keyword in model_keywords):
+            return col
+    
+    return None
+
+def detect_tracking_column(df):
+    tracking_keywords = ['tracking', 'tracking no', 'reference', 'ref no', 'job no', 'id']
+    
+    for col in df.columns:
+        col_lower = str(col).lower()
+        if any(keyword in col_lower for keyword in tracking_keywords):
             return col
     
     return None
