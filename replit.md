@@ -32,12 +32,15 @@ Preferred communication style: Simple, everyday language.
 **Solution:** Dictionary-based threshold mapping system (LTP_THRESHOLDS) that maps appliance types to acceptable repair durations in days
 
 **Threshold Strategy:**
-- Quick turnaround items (phones, laptops, computers, tablets): 3 days
-- Extended repair items (fridges, refrigerators): 7 days  
-- Standard appliances (washing machines, TVs, microwaves, etc.): 4 days
-- Fallback default: 4 days for unrecognized appliance types
+- HA and DTV model codes: 7 days
+- HHP and MTN model codes: 4 days
+- Fallback default: 4 days for unrecognized model codes
 
-**Flexible Column Detection:** The `detect_date_column()` function automatically identifies date-related columns using keyword matching, making the system adaptable to different data formats without hardcoding column names.
+**Flexible Column Detection:** The system automatically identifies:
+- `Requested Date` column for intake date tracking
+- `Model Code` column for determining LTP thresholds (HA, DTV, HHP, MTN)
+- `Tracking No` column for unique job reference identification
+- Service Type and Status columns (optional)
 
 ## Visualization Layer
 

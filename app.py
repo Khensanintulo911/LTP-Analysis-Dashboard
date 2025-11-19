@@ -13,6 +13,7 @@ LTP_THRESHOLDS = {
     'HA': 7,
     'DTV': 7,
     'HHP': 4,
+    'MTN': 4,
     'default': 4
 }
 
@@ -77,15 +78,16 @@ def detect_status_column(df):
 
 def process_data(df):
     date_col = detect_date_column(df)
-    appliance_col = detect_appliance_column(df)
+    model_col = detect_model_code_column(df)
+    tracking_col = detect_tracking_column(df)
     status_col = detect_status_column(df)
     
     if date_col is None:
-        st.error("❌ Could not detect a date column. Please ensure your file has a date column (e.g., 'Date', 'Intake Date', etc.)")
-        return None, None, None, None
+        st.error("❌ Could not detect a date column. Please ensure your file has a 'Requested Date' column.")
+        return None, None, None, None, None
     
-    if appliance_col is None:
-        st.warning("⚠️ Could not detect an appliance type column. Using default LTP threshold of 4 days for all items.")
+    if model_col is None:
+        st.warning("⚠️ Could not detect a Model Code column. Using default LTP threshold of 4 days for all items.")
     
     df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
     
@@ -94,15 +96,17 @@ def process_data(df):
     today = pd.Timestamp(datetime.now().date())
     df['days_pending'] = (today - df[date_col]).dt.days
     
-    if appliance_col:
-        df['ltp_threshold'] = df[appliance_col].apply(get_ltp_threshold)
+    if model_col:
+        df['ltp_threshold'] = df[model_col].apply(get_ltp_threshold)
     else:
         df['ltp_threshold'] = LTP_THRESHOLDS['default']
     
     df['is_ltp'] = df['days_pending'] > df['ltp_threshold']
     df['ltp_status'] = df['is_ltp'].apply(lambda x: '🚨 LTP' if x else '✅ On Time')
     
-    return df, date_col, appliance_col, status_col
+    df['ltp_date'] = df.apply(lambda row: row[date_col] + timedelta(days=int(row['ltp_threshold'])), axis=1)
+    
+    return df, date_col, model_col, tracking_col, status_col
 
 uploaded_file = st.file_uploader("📁 Upload your CSV or Excel file", type=['csv', 'xlsx', 'xls'])
 
@@ -118,7 +122,7 @@ if uploaded_file is not None:
         with st.expander("📋 Preview Raw Data (First 10 rows)"):
             st.dataframe(df_raw.head(10), use_container_width=True)
         
-        df, date_col, appliance_col, status_col = process_data(df_raw)
+        df, date_col, model_col, tracking_col, status_col = process_data(df_raw)
         
         if df is not None:
             st.markdown("---")
@@ -176,11 +180,11 @@ if uploaded_file is not None:
                                   annotation_text="Typical LTP Threshold")
                 st.plotly_chart(fig_hist, use_container_width=True)
             
-            if appliance_col:
+            if model_col:
                 st.markdown("---")
-                st.subheader("🔍 Analysis by Appliance Type")
+                st.subheader("🔍 Analysis by Model Code")
                 
-                appliance_analysis = df.groupby(appliance_col).agg({
+                appliance_analysis = df.groupby(model_col).agg({
                     'is_ltp': ['sum', 'count'],
                     'days_pending': 'mean',
                     'ltp_threshold': 'first'
@@ -209,8 +213,8 @@ if uploaded_file is not None:
                     ))
                     fig_bar.update_layout(
                         barmode='stack',
-                        title='LTP vs On Time by Appliance Type',
-                        xaxis_title='Appliance Type',
+                        title='LTP vs On Time by Model Code',
+                        xaxis_title='Model Code',
                         yaxis_title='Count'
                     )
                     st.plotly_chart(fig_bar, use_container_width=True)
@@ -247,14 +251,14 @@ if uploaded_file is not None:
                 )
             
             with filter_col2:
-                if appliance_col:
-                    appliance_types = ['All'] + sorted(df[appliance_col].unique().tolist())
-                    filter_appliance = st.selectbox(
-                        "Filter by Appliance Type",
-                        appliance_types
+                if model_col:
+                    model_codes = ['All'] + sorted(df[model_col].unique().tolist())
+                    filter_model = st.selectbox(
+                        "Filter by Model Code",
+                        model_codes
                     )
                 else:
-                    filter_appliance = 'All'
+                    filter_model = 'All'
             
             df_filtered = df.copy()
             
@@ -263,8 +267,8 @@ if uploaded_file is not None:
             elif filter_ltp == "On Time Only":
                 df_filtered = df_filtered[df_filtered['is_ltp'] == False]
             
-            if appliance_col and filter_appliance != 'All':
-                df_filtered = df_filtered[df_filtered[appliance_col] == filter_appliance]
+            if model_col and filter_model != 'All':
+                df_filtered = df_filtered[df_filtered[model_col] == filter_model]
             
             display_columns = [col for col in df.columns if col not in ['is_ltp', 'ltp_threshold']]
             
@@ -309,13 +313,17 @@ else:
     st.markdown("""
     1. **Upload your file** - CSV or Excel format containing repair data
     2. **Required columns:**
-       - A date column (e.g., "Date", "Intake Date", "Received Date")
-       - Appliance type column (optional but recommended)
-       - Status column (optional)
-    3. **LTP Thresholds** - Automatically applied based on appliance type:
-       - Phones, Laptops, Tablets: **3 days**
-       - Fridges, Refrigerators: **7 days**
-       - Other appliances: **4 days**
+       - **Requested Date** - When the device was booked for repair
+       - **Model Code** - Device model code (HA, DTV, HHP, MTN, etc.)
+       - **Tracking No** - Unique job reference number (optional)
+       - **Service Type** - Type of service (optional)
+    3. **LTP Thresholds** - Automatically applied based on Model Code:
+       - **HA, DTV**: 7 days
+       - **HHP, MTN**: 4 days
+       - Other models: 4 days (default)
     4. **Review the dashboard** to see which items are in LTP status
-    5. **Use filters** to focus on specific appliance types or LTP items only
+    5. **Use filters** to focus on specific model codes or LTP items only
+    
+    **Note:** The system calculates "Days Pending" as the time from Requested Date to today, 
+    and flags items as LTP when they exceed their model-specific threshold.
     """)
