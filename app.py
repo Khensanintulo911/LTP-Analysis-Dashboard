@@ -608,7 +608,7 @@ else:
        - **Status** (optional) - Current service status
     3. **LTP Thresholds** - Automatically applied based on Model Code:
        - **HA, DTV**: 7 days
-       - **HHP, MTN**: 4 days
+       - **HHP**: 4 days
        - **Other models**: 4 days (default)
     4. **Review the dashboard** to identify LTP items
     5. **Use filters** to focus on specific categories
