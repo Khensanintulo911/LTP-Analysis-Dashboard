@@ -15,7 +15,7 @@ LTP_THRESHOLDS = {
     'HA': 7,
     'DTV': 7,
     'HHP': 4,
-    'MTN': 4,
+   #'MTN': 4,
     'default': 4
 }
 
@@ -58,13 +58,61 @@ def detect_column(df, keywords, column_type="column"):
     
     return None
 
-def detect_date_column(df):
-    date_keywords = ['requested date', 'request date', 'date', 'intake', 'received', 'started', 'created', 'opened', 'submitted']
-    return detect_column(df, date_keywords, "date")
+def detect_requested_date_column(df):
+    """Detect the Requested Date column (when item was received)."""
+    requested_keywords = ['requested date', 'request date', 'intake date', 'received date', 'started date']
+    return detect_column(df, requested_keywords, "date")
 
 def detect_model_code_column(df):
     model_keywords = ['model code', 'model', 'code', 'type', 'category', 'appliance type', 'product']
     return detect_column(df, model_keywords)
+
+# --- new: robust date detection that prefers Anticipated Date ---
+def detect_date_column(df):
+    """
+    Return the best date column to use for LTP calculation.
+    Preference order:
+      1. Anticipated / First Anticipated Date
+      2. Requested / Intake / Received Date
+      3. Any datetime-typed column
+      4. Any column parsable as dates (sample)
+      5. Any column with 'date' in its name
+    """
+    # 1) prefer anticipated
+    col = detect_anticipated_date_column(df)
+    if col:
+        return col
+
+    # 2) fall back to requested variants
+    col = detect_requested_date_column(df)
+    if col:
+        return col
+
+    # 3) any datetime dtype
+    for c in df.columns:
+        try:
+            if pd.api.types.is_datetime64_any_dtype(df[c]):
+                return c
+        except Exception:
+            pass
+
+    # 4) try parsing small samples
+    for c in df.columns:
+        try:
+            sample = df[c].dropna().iloc[:5]
+            if len(sample) == 0:
+                continue
+            pd.to_datetime(sample)
+            return c
+        except Exception:
+            continue
+
+    # 5) any column name containing 'date'
+    for c in df.columns:
+        if 'date' in str(c).lower():
+            return c
+
+    return None
 
 def detect_tracking_column(df):
     tracking_keywords = ['tracking no', 'tracking', 'reference', 'ref no', 'job no', 'job number', 'id', 'ticket']
@@ -76,13 +124,14 @@ def detect_status_column(df):
 
 def process_data(df):
     """Process uploaded data and calculate LTP metrics."""
+    # detect date column (prefer Anticipated Date)
     date_col = detect_date_column(df)
     model_col = detect_model_code_column(df)
     tracking_col = detect_tracking_column(df)
     status_col = detect_status_column(df)
     
     if date_col is None:
-        st.error("❌ Could not detect a date column. Please ensure your file has a date column (e.g., 'Requested Date').")
+        st.error("❌ Could not detect a date column. Please ensure your file has an Anticipated Date (preferred) or a Requested/Intake/Date column.")
         return None, None, None, None, None
     
     if model_col is None:
