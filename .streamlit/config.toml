@@ -1,4 +1,8 @@
+# Minimal Streamlit config for containerized deployment
 [server]
 headless = true
-address = "0.0.0.0"
-port = 5000
+enableCORS = false
+port = 8501
+
+[browser]
+gatherUsageStats = false

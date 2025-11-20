@@ -517,6 +517,18 @@ def render_signature():
     """
     st.markdown(footer_html, unsafe_allow_html=True)
 
+# Hide only Streamlit "Share / Deploy" badge but keep header/footer and your signature
+st.markdown(
+    """
+    <style>
+      header { visibility: hidden; }
+      footer { visibility: hidden; }
+      .stApp { padding-top: 0rem; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # Sidebar controls
 if 'show_signature' not in st.session_state:
     st.session_state['show_signature'] = True
