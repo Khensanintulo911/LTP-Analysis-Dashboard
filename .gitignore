@@ -1,0 +1,90 @@
+## .gitignore for LTP Analysis Dashboard (Python / Streamlit)
+# Generated to ignore virtualenvs, IDE config, data files, build artifacts, and logs
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+
+# Pytest
+.pytest_cache/
+
+# Coverage
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# mypy
+.mypy_cache/
+
+# pyre
+.pyre/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# Streamlit local state
+.streamlit/
+
+# IDEs and editors
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+logs/
+*.log
+
+# Data and uploads (do NOT commit large or sensitive data)
+*.xlsx
+*.xls
+*.csv
+uploads/
+data/
+datasets/
+
+# Database
+*.db
+
+# Environment / secrets
+.env
+.env.*
+secrets.toml
+*.pem
+*.key
+
+# Misc
+node_modules/
+.cache/
+__MACOSX/
+
+# Pipenv
+Pipfile.lock

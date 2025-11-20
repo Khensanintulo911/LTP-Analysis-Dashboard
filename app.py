@@ -3,12 +3,14 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
+import io
 
 st.set_page_config(page_title="LTP Analysis Dashboard", layout="wide")
 
 st.title("🔧 LTP Analysis Dashboard")
 st.markdown("Upload your repair shop data to analyze Long Time Pending (LTP) appliances")
 
+# LTP Thresholds configuration
 LTP_THRESHOLDS = {
     'HA': 7,
     'DTV': 7,
@@ -18,100 +20,158 @@ LTP_THRESHOLDS = {
 }
 
 def get_ltp_threshold(model_code):
+    """Determine LTP threshold based on model code."""
     if pd.isna(model_code):
         return LTP_THRESHOLDS['default']
     
     model_upper = str(model_code).upper().strip()
     
     for code, threshold in LTP_THRESHOLDS.items():
-        if code in model_upper:
+        if code != 'default' and code in model_upper:
             return threshold
     
     return LTP_THRESHOLDS['default']
 
+def detect_column(df, keywords, column_type="column"):
+    """Generic column detection function."""
+    # First pass: exact keyword matches
+    for col in df.columns:
+        col_lower = str(col).lower().strip()
+        if any(keyword == col_lower for keyword in keywords):
+            return col
+    
+    # Second pass: partial matches
+    for col in df.columns:
+        col_lower = str(col).lower().strip()
+        if any(keyword in col_lower for keyword in keywords):
+            return col
+    
+    # For date columns, try parsing
+    if column_type == "date":
+        for col in df.columns:
+            try:
+                sample = df[col].dropna().iloc[:5]
+                pd.to_datetime(sample)
+                return col
+            except:
+                continue
+    
+    return None
+
 def detect_date_column(df):
     date_keywords = ['requested date', 'request date', 'date', 'intake', 'received', 'started', 'created', 'opened', 'submitted']
-    
-    for col in df.columns:
-        col_lower = str(col).lower()
-        if any(keyword in col_lower for keyword in date_keywords):
-            return col
-    
-    for col in df.columns:
-        try:
-            pd.to_datetime(df[col].dropna().iloc[0])
-            return col
-        except:
-            continue
-    
-    return None
+    return detect_column(df, date_keywords, "date")
 
 def detect_model_code_column(df):
-    model_keywords = ['model', 'code', 'model code', 'type', 'category', 'appliance type']
-    
-    for col in df.columns:
-        col_lower = str(col).lower()
-        if any(keyword in col_lower for keyword in model_keywords):
-            return col
-    
-    return None
+    model_keywords = ['model code', 'model', 'code', 'type', 'category', 'appliance type', 'product']
+    return detect_column(df, model_keywords)
 
 def detect_tracking_column(df):
-    tracking_keywords = ['tracking', 'tracking no', 'reference', 'ref no', 'job no', 'id']
-    
-    for col in df.columns:
-        col_lower = str(col).lower()
-        if any(keyword in col_lower for keyword in tracking_keywords):
-            return col
-    
-    return None
+    tracking_keywords = ['tracking no', 'tracking', 'reference', 'ref no', 'job no', 'job number', 'id', 'ticket']
+    return detect_column(df, tracking_keywords)
 
 def detect_status_column(df):
-    status_keywords = ['status', 'state', 'condition', 'progress']
-    
-    for col in df.columns:
-        col_lower = str(col).lower()
-        if any(keyword in col_lower for keyword in status_keywords):
-            return col
-    
-    return None
+    status_keywords = ['status', 'state', 'condition', 'progress', 'stage']
+    return detect_column(df, status_keywords)
 
 def process_data(df):
+    """Process uploaded data and calculate LTP metrics."""
     date_col = detect_date_column(df)
     model_col = detect_model_code_column(df)
     tracking_col = detect_tracking_column(df)
     status_col = detect_status_column(df)
     
     if date_col is None:
-        st.error("❌ Could not detect a date column. Please ensure your file has a 'Requested Date' column.")
+        st.error("❌ Could not detect a date column. Please ensure your file has a date column (e.g., 'Requested Date').")
         return None, None, None, None, None
     
     if model_col is None:
         st.warning("⚠️ Could not detect a Model Code column. Using default LTP threshold of 4 days for all items.")
     
+    # Convert date column
     df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+    
+    # Remove rows with invalid dates
+    invalid_dates = df[date_col].isna().sum()
+    if invalid_dates > 0:
+        st.warning(f"⚠️ Removed {invalid_dates} rows with invalid dates.")
     
     df = df[df[date_col].notna()].copy()
     
+    if len(df) == 0:
+        st.error("❌ No valid data remaining after date filtering.")
+        return None, None, None, None, None
+    
+    # Calculate days pending
     today = pd.Timestamp(datetime.now().date())
     df['days_pending'] = (today - df[date_col]).dt.days
     
+    # Apply LTP thresholds
     if model_col:
         df['ltp_threshold'] = df[model_col].apply(get_ltp_threshold)
     else:
         df['ltp_threshold'] = LTP_THRESHOLDS['default']
     
+    # Determine LTP status
     df['is_ltp'] = df['days_pending'] > df['ltp_threshold']
     df['ltp_status'] = df['is_ltp'].apply(lambda x: '🚨 LTP' if x else '✅ On Time')
     
-    df['ltp_date'] = df.apply(lambda row: row[date_col] + timedelta(days=int(row['ltp_threshold'])), axis=1)
+    # Calculate expected completion date
+    df['ltp_date'] = df.apply(
+        lambda row: row[date_col] + timedelta(days=int(row['ltp_threshold'])), 
+        axis=1
+    )
+    
+    # Calculate days overdue for LTP items
+    df['days_overdue'] = df.apply(
+        lambda row: max(0, row['days_pending'] - row['ltp_threshold']) if row['is_ltp'] else 0,
+        axis=1
+    )
     
     return df, date_col, model_col, tracking_col, status_col
 
+def export_to_excel(df, filename="ltp_report.xlsx"):
+    """Export data to Excel with formatting.
+
+    Tries to use `xlsxwriter` for improved formatting. If `xlsxwriter` is
+    not available, falls back to `openpyxl` engine (no header styling).
+    """
+    output = io.BytesIO()
+
+    # Choose engine: prefer xlsxwriter if installed
+    try:
+        import xlsxwriter  # noqa: F401
+        engine = 'xlsxwriter'
+    except Exception:
+        engine = 'openpyxl'
+
+    with pd.ExcelWriter(output, engine=engine) as writer:
+        df.to_excel(writer, sheet_name='LTP Analysis', index=False)
+
+        if engine == 'xlsxwriter':
+            workbook = writer.book
+            worksheet = writer.sheets['LTP Analysis']
+
+            # Header formatting for xlsxwriter
+            header_format = workbook.add_format({
+                'bold': True,
+                'bg_color': '#4472C4',
+                'font_color': 'white',
+                'border': 1
+            })
+
+            for col_num, value in enumerate(df.columns.values):
+                worksheet.write(0, col_num, value, header_format)
+
+    output.seek(0)
+    return output.getvalue()
+
+# File uploader
 uploaded_file = st.file_uploader("📁 Upload your CSV or Excel file", type=['csv', 'xlsx', 'xls'])
 
 if uploaded_file is not None:
     try:
+        # Load data
         if uploaded_file.name.endswith('.csv'):
             df_raw = pd.read_csv(uploaded_file)
         else:
@@ -119,38 +179,46 @@ if uploaded_file is not None:
         
         st.success(f"✅ File uploaded successfully! Found {len(df_raw)} records.")
         
+        # Preview raw data
         with st.expander("📋 Preview Raw Data (First 10 rows)"):
             st.dataframe(df_raw.head(10), use_container_width=True)
         
+        # Process data
         df, date_col, model_col, tracking_col, status_col = process_data(df_raw)
         
         if df is not None:
             st.markdown("---")
             st.header("📊 Dashboard Overview")
             
-            col1, col2, col3, col4 = st.columns(4)
+            # Key metrics
+            col1, col2, col3, col4, col5 = st.columns(5)
             
             total_appliances = len(df)
             ltp_count = df['is_ltp'].sum()
             ltp_percentage = (ltp_count / total_appliances * 100) if total_appliances > 0 else 0
             avg_days = df['days_pending'].mean()
+            max_days_overdue = df['days_overdue'].max() if ltp_count > 0 else 0
             
             with col1:
-                st.metric("🔧 Total Appliances", f"{total_appliances}")
+                st.metric("🔧 Total Appliances", f"{total_appliances:,}")
             
             with col2:
-                st.metric("🚨 LTP Items", f"{ltp_count}", 
+                st.metric("🚨 LTP Items", f"{ltp_count:,}", 
                          delta=f"{ltp_percentage:.1f}%", 
                          delta_color="inverse")
             
             with col3:
-                st.metric("✅ On Time", f"{total_appliances - ltp_count}")
+                st.metric("✅ On Time", f"{total_appliances - ltp_count:,}")
             
             with col4:
                 st.metric("⏱️ Avg Days Pending", f"{avg_days:.1f}")
             
+            with col5:
+                st.metric("⚠️ Max Days Overdue", f"{int(max_days_overdue)}")
+            
             st.markdown("---")
             
+            # Visualizations
             col_left, col_right = st.columns(2)
             
             with col_left:
@@ -160,9 +228,11 @@ if uploaded_file is not None:
                     values=ltp_dist.values, 
                     names=ltp_dist.index,
                     color=ltp_dist.index,
-                    color_discrete_map={'🚨 LTP': '#ff4b4b', '✅ On Time': '#00cc66'}
+                    color_discrete_map={'🚨 LTP': '#ff4b4b', '✅ On Time': '#00cc66'},
+                    hole=0.4
                 )
                 fig_ltp.update_traces(textposition='inside', textinfo='percent+label')
+                fig_ltp.update_layout(showlegend=False)
                 st.plotly_chart(fig_ltp, use_container_width=True)
             
             with col_right:
@@ -170,16 +240,39 @@ if uploaded_file is not None:
                 fig_hist = px.histogram(
                     df, 
                     x='days_pending',
-                    nbins=20,
+                    nbins=30,
                     labels={'days_pending': 'Days Pending'},
                     color_discrete_sequence=['#1f77b4']
                 )
-                fig_hist.add_vline(x=df['ltp_threshold'].median(), 
-                                  line_dash="dash", 
-                                  line_color="red",
-                                  annotation_text="Typical LTP Threshold")
+                fig_hist.add_vline(
+                    x=df['ltp_threshold'].median(), 
+                    line_dash="dash", 
+                    line_color="red",
+                    annotation_text="Median LTP Threshold",
+                    annotation_position="top"
+                )
                 st.plotly_chart(fig_hist, use_container_width=True)
             
+            # Trend analysis
+            if date_col:
+                st.markdown("---")
+                st.subheader("📅 Daily Intake Trend")
+                
+                daily_intake = df.groupby(df[date_col].dt.date).size().reset_index()
+                daily_intake.columns = ['Date', 'Count']
+                
+                fig_trend = px.line(
+                    daily_intake, 
+                    x='Date', 
+                    y='Count',
+                    markers=True,
+                    labels={'Count': 'Appliances Received'},
+                    color_discrete_sequence=['#636EFA']
+                )
+                fig_trend.update_layout(hovermode='x unified')
+                st.plotly_chart(fig_trend, use_container_width=True)
+            
+            # Model analysis
             if model_col:
                 st.markdown("---")
                 st.subheader("🔍 Analysis by Model Code")
@@ -187,10 +280,11 @@ if uploaded_file is not None:
                 appliance_analysis = df.groupby(model_col).agg({
                     'is_ltp': ['sum', 'count'],
                     'days_pending': 'mean',
-                    'ltp_threshold': 'first'
+                    'ltp_threshold': 'first',
+                    'days_overdue': 'sum'
                 }).round(1)
                 
-                appliance_analysis.columns = ['LTP Count', 'Total', 'Avg Days Pending', 'LTP Threshold']
+                appliance_analysis.columns = ['LTP Count', 'Total', 'Avg Days Pending', 'LTP Threshold', 'Total Days Overdue']
                 appliance_analysis['On Time'] = appliance_analysis['Total'] - appliance_analysis['LTP Count']
                 appliance_analysis['LTP %'] = (appliance_analysis['LTP Count'] / appliance_analysis['Total'] * 100).round(1)
                 appliance_analysis = appliance_analysis.sort_values('LTP Count', ascending=False)
@@ -203,46 +297,79 @@ if uploaded_file is not None:
                         name='On Time',
                         x=appliance_analysis.index,
                         y=appliance_analysis['On Time'],
-                        marker_color='#00cc66'
+                        marker_color='#00cc66',
+                        text=appliance_analysis['On Time'],
+                        textposition='inside'
                     ))
                     fig_bar.add_trace(go.Bar(
                         name='LTP',
                         x=appliance_analysis.index,
                         y=appliance_analysis['LTP Count'],
-                        marker_color='#ff4b4b'
+                        marker_color='#ff4b4b',
+                        text=appliance_analysis['LTP Count'],
+                        textposition='inside'
                     ))
                     fig_bar.update_layout(
                         barmode='stack',
                         title='LTP vs On Time by Model Code',
                         xaxis_title='Model Code',
-                        yaxis_title='Count'
+                        yaxis_title='Count',
+                        showlegend=True
                     )
                     st.plotly_chart(fig_bar, use_container_width=True)
                 
                 with col_table:
                     st.dataframe(
-                        appliance_analysis[['Total', 'LTP Count', 'LTP %', 'LTP Threshold']],
+                        appliance_analysis[['Total', 'LTP Count', 'LTP %', 'Avg Days Pending']].style.format({
+                            'Total': '{:,.0f}',
+                            'LTP Count': '{:,.0f}',
+                            'LTP %': '{:.1f}%',
+                            'Avg Days Pending': '{:.1f}'
+                        }),
                         use_container_width=True
                     )
             
+            # Status breakdown
             if status_col:
                 st.markdown("---")
                 st.subheader("📋 Status Breakdown")
                 
-                status_dist = df[status_col].value_counts()
-                fig_status = px.bar(
-                    x=status_dist.index,
-                    y=status_dist.values,
-                    labels={'x': 'Status', 'y': 'Count'},
-                    color=status_dist.values,
-                    color_continuous_scale='Blues'
-                )
-                st.plotly_chart(fig_status, use_container_width=True)
+                col_status1, col_status2 = st.columns(2)
+                
+                with col_status1:
+                    status_dist = df[status_col].value_counts()
+                    fig_status = px.bar(
+                        x=status_dist.index,
+                        y=status_dist.values,
+                        labels={'x': 'Status', 'y': 'Count'},
+                        color=status_dist.values,
+                        color_continuous_scale='Blues',
+                        text=status_dist.values
+                    )
+                    fig_status.update_traces(textposition='outside')
+                    st.plotly_chart(fig_status, use_container_width=True)
+                
+                with col_status2:
+                    # LTP by status
+                    ltp_by_status = df[df['is_ltp']].groupby(status_col).size().sort_values(ascending=False)
+                    if len(ltp_by_status) > 0:
+                        fig_ltp_status = px.bar(
+                            x=ltp_by_status.index,
+                            y=ltp_by_status.values,
+                            labels={'x': 'Status', 'y': 'LTP Count'},
+                            color=ltp_by_status.values,
+                            color_continuous_scale='Reds',
+                            text=ltp_by_status.values,
+                            title='LTP Items by Status'
+                        )
+                        fig_ltp_status.update_traces(textposition='outside')
+                        st.plotly_chart(fig_ltp_status, use_container_width=True)
             
+            # Detailed data table
             st.markdown("---")
             st.header("📋 Detailed Data Table")
             
-            filter_col1, filter_col2 = st.columns(2)
+            filter_col1, filter_col2, filter_col3 = st.columns(3)
             
             with filter_col1:
                 filter_ltp = st.selectbox(
@@ -252,7 +379,7 @@ if uploaded_file is not None:
             
             with filter_col2:
                 if model_col:
-                    model_codes = ['All'] + sorted(df[model_col].unique().tolist())
+                    model_codes = ['All'] + sorted(df[model_col].dropna().unique().tolist())
                     filter_model = st.selectbox(
                         "Filter by Model Code",
                         model_codes
@@ -260,6 +387,13 @@ if uploaded_file is not None:
                 else:
                     filter_model = 'All'
             
+            with filter_col3:
+                sort_by = st.selectbox(
+                    "Sort by",
+                    ["Days Pending (High to Low)", "Days Pending (Low to High)", "Date (Newest)", "Date (Oldest)"]
+                )
+            
+            # Apply filters
             df_filtered = df.copy()
             
             if filter_ltp == "LTP Only":
@@ -270,6 +404,17 @@ if uploaded_file is not None:
             if model_col and filter_model != 'All':
                 df_filtered = df_filtered[df_filtered[model_col] == filter_model]
             
+            # Apply sorting
+            if sort_by == "Days Pending (High to Low)":
+                df_filtered = df_filtered.sort_values('days_pending', ascending=False)
+            elif sort_by == "Days Pending (Low to High)":
+                df_filtered = df_filtered.sort_values('days_pending', ascending=True)
+            elif sort_by == "Date (Newest)":
+                df_filtered = df_filtered.sort_values(date_col, ascending=False)
+            else:  # Date (Oldest)
+                df_filtered = df_filtered.sort_values(date_col, ascending=True)
+            
+            # Select display columns
             display_columns = [col for col in df.columns if col not in ['is_ltp', 'ltp_threshold']]
             
             def highlight_ltp(row):
@@ -283,26 +428,43 @@ if uploaded_file is not None:
                 height=400
             )
             
-            st.info(f"📊 Showing {len(df_filtered)} of {len(df)} records")
+            st.info(f"📊 Showing {len(df_filtered):,} of {len(df):,} records")
             
+            # Export functionality
+            st.markdown("---")
+            col_export1, col_export2 = st.columns([3, 1])
+            
+            with col_export2:
+                excel_data = export_to_excel(df_filtered[display_columns])
+                st.download_button(
+                    label="📥 Download Filtered Data (Excel)",
+                    data=excel_data,
+                    file_name=f"ltp_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            
+            # LTP Alert Summary
             if ltp_count > 0:
                 st.markdown("---")
                 st.header("⚠️ LTP Alert Summary")
                 ltp_items = df[df['is_ltp'] == True].copy()
-                ltp_items = ltp_items.sort_values('days_pending', ascending=False)
+                ltp_items = ltp_items.sort_values('days_overdue', ascending=False)
                 
-                st.error(f"🚨 **{ltp_count} items are currently in LTP status and require immediate attention!**")
+                st.error(f"🚨 **{ltp_count:,} items are currently in LTP status and require immediate attention!**")
                 
+                # Top overdue items
+                st.subheader("🔴 Most Overdue Items")
                 st.dataframe(
                     ltp_items[display_columns].head(10),
                     use_container_width=True
                 )
                 
                 if len(ltp_items) > 10:
-                    st.caption(f"Showing top 10 most overdue items. Use filters above to see all {len(ltp_items)} LTP items.")
+                    st.caption(f"Showing top 10 most overdue items. Use filters above to see all {len(ltp_items):,} LTP items.")
     
     except Exception as e:
         st.error(f"❌ Error processing file: {str(e)}")
+        st.exception(e)
         st.info("Please ensure your file contains proper date columns and is formatted correctly.")
 
 else:
@@ -313,17 +475,70 @@ else:
     st.markdown("""
     1. **Upload your file** - CSV or Excel format containing repair data
     2. **Required columns:**
-       - **Requested Date** - When the device was booked for repair
-       - **Model Code** - Device model code (HA, DTV, HHP, MTN, etc.)
-       - **Tracking No** - Unique job reference number (optional)
-       - **Service Type** - Type of service (optional)
+       - **Date column** (e.g., Requested Date, Intake Date) - When the device was booked
+       - **Model Code** (optional) - Device model code (HA, DTV, HHP, MTN, etc.)
+       - **Tracking No** (optional) - Unique job reference number
+       - **Status** (optional) - Current service status
     3. **LTP Thresholds** - Automatically applied based on Model Code:
        - **HA, DTV**: 7 days
        - **HHP, MTN**: 4 days
-       - Other models: 4 days (default)
-    4. **Review the dashboard** to see which items are in LTP status
-    5. **Use filters** to focus on specific model codes or LTP items only
+       - **Other models**: 4 days (default)
+    4. **Review the dashboard** to identify LTP items
+    5. **Use filters** to focus on specific categories
+    6. **Export results** for further analysis or reporting
     
-    **Note:** The system calculates "Days Pending" as the time from Requested Date to today, 
-    and flags items as LTP when they exceed their model-specific threshold.
+    **Note:** LTP status is calculated as days from the request date exceeding the model-specific threshold.
     """)
+
+def render_signature():
+    footer_html = """
+    <style>
+    .dv-footer{
+      position:fixed;
+      bottom:8px;
+      right:12px;
+      font-size:11px;
+      color:#6c757d;
+      padding:6px 10px;
+      border-radius:6px;
+      background: rgba(255,255,255,0.85);
+      box-shadow: 0 1px 6px rgba(0,0,0,0.08);
+      z-index:9999;
+      backdrop-filter: blur(4px);
+    }
+    .dv-footer a{ color:inherit; text-decoration:none; font-weight:600; }
+    .dv-footer a:hover{ text-decoration:underline; }
+    .dv-footer small{ color: #6b7280; margin-left:6px; font-weight:400; }
+    </style>
+    <div class="dv-footer" role="note" aria-label="app signature">
+      Built for <strong>MM All Electronics</strong> • Built by <a href="https://devpulse.inc" target="_blank" rel="noopener">K. Ntulo</a>
+      <small>— devpulse.inc</small>
+    </div>
+    """
+    st.markdown(footer_html, unsafe_allow_html=True)
+
+# Sidebar controls
+if 'show_signature' not in st.session_state:
+    st.session_state['show_signature'] = True
+
+with st.sidebar:
+    st.markdown("### ⚙️ Settings")
+    st.checkbox("Show signature", value=st.session_state['show_signature'], key='show_signature')
+    
+    if st.checkbox("Show developer info", value=False):
+        st.markdown("""
+        **Developer:** K. Ntulo  
+        **Company:** devpulse.inc  
+        **Developed for:** MM All Electronics  
+        **Contact:** [danailntulo@gmail.com](mailto:danailntulo@gmail.com)
+        """)
+    
+    st.markdown("---")
+    st.markdown("### 📖 About")
+    st.markdown("""
+    This dashboard helps track and analyze Long Time Pending (LTP) appliances 
+    in the repair workflow, enabling better service management and customer communication.
+    """)
+
+if st.session_state.get('show_signature', True):
+    render_signature()

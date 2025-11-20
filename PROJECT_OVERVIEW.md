@@ -79,6 +79,6 @@ Preferred communication style: Simple, everyday language.
 
 ## Deployment Considerations
 
-**Platform:** Designed for Replit deployment (repl-nix-workspace environment)
+**Platform:** Streamlit app — platform-agnostic (can be deployed to any PaaS, cloud VM, or container)
 - Entry point: `app.py` for Streamlit application
-- Secondary file: `main.py` (minimal Python entry point, likely for testing)
+- Secondary file: `main.py` (minimal Python entry point, useful for quick checks)
