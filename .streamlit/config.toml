@@ -1,7 +1,8 @@
-# Minimal Streamlit config for containerized deployment
+# Streamlit config for deployment
 [server]
 headless = true
-enableCORS = false
+enableCORS = true
+enableXsrfProtection = true
 port = 8501
 
 [browser]
