@@ -58,13 +58,75 @@ def detect_column(df, keywords, column_type="column"):
     
     return None
 
-def detect_date_column(df):
-    date_keywords = ['requested date', 'request date', 'date', 'intake', 'received', 'started', 'created', 'opened', 'submitted']
-    return detect_column(df, date_keywords, "date")
+def detect_requested_date_column(df):
+    """Detect the Requested Date column (when item was received)."""
+    requested_keywords = ['requested date', 'request date', 'intake date', 'received date', 'started date']
+    return detect_column(df, requested_keywords, "date")
 
 def detect_model_code_column(df):
     model_keywords = ['model code', 'model', 'code', 'type', 'category', 'appliance type', 'product']
     return detect_column(df, model_keywords)
+
+def detect_anticipated_date_column(df):
+    """Detect the First Anticipated / Anticipated Date column (used for LTP calculation)."""
+    anticipated_keywords = [
+        'first anticipated date',
+        'first anticipated',
+        'anticipated date',
+        'anticipated',
+        'expected date',
+        'completion date',
+        'due date',
+        'target date'
+    ]
+    return detect_column(df, anticipated_keywords, "date")
+
+# --- new: robust date detection that prefers Anticipated Date ---
+def detect_date_column(df):
+    """
+    Return the best date column to use for LTP calculation.
+    Preference order:
+      1. Anticipated / First Anticipated Date
+      2. Requested / Intake / Received Date
+      3. Any datetime-typed column
+      4. Any column parsable as dates (sample)
+      5. Any column with 'date' in its name
+    """
+    # 1) prefer anticipated
+    col = detect_anticipated_date_column(df)
+    if col:
+        return col
+
+    # 2) fall back to requested variants
+    col = detect_requested_date_column(df)
+    if col:
+        return col
+
+    # 3) any datetime dtype
+    for c in df.columns:
+        try:
+            if pd.api.types.is_datetime64_any_dtype(df[c]):
+                return c
+        except Exception:
+            pass
+
+    # 4) try parsing small samples
+    for c in df.columns:
+        try:
+            sample = df[c].dropna().iloc[:5]
+            if len(sample) == 0:
+                continue
+            pd.to_datetime(sample)
+            return c
+        except Exception:
+            continue
+
+    # 5) any column name containing 'date'
+    for c in df.columns:
+        if 'date' in str(c).lower():
+            return c
+
+    return None
 
 def detect_tracking_column(df):
     tracking_keywords = ['tracking no', 'tracking', 'reference', 'ref no', 'job no', 'job number', 'id', 'ticket']
@@ -75,59 +137,109 @@ def detect_status_column(df):
     return detect_column(df, status_keywords)
 
 def process_data(df):
-    """Process uploaded data and calculate LTP metrics."""
+    """Process uploaded data and calculate LTP metrics.
+
+    Rows with placeholder dates like '00.00.0000' are kept and marked as
+    'Pending Assignment' instead of being removed.
+    """
     date_col = detect_date_column(df)
     model_col = detect_model_code_column(df)
     tracking_col = detect_tracking_column(df)
     status_col = detect_status_column(df)
-    
+
     if date_col is None:
-        st.error("❌ Could not detect a date column. Please ensure your file has a date column (e.g., 'Requested Date').")
+        st.error("❌ Could not detect a date column. Please ensure your file has an Anticipated Date (preferred) or a Requested/Intake/Date column.")
         return None, None, None, None, None
-    
-    if model_col is None:
-        st.warning("⚠️ Could not detect a Model Code column. Using default LTP threshold of 4 days for all items.")
-    
-    # Convert date column
+
+    # Normalize column to string for placeholder detection
+    date_series_raw = df[date_col].astype(str).str.strip()
+
+    # Common placeholder patterns to treat as "Pending Assignment"
+    placeholders = {'00.00.0000', '00/00/0000', '0000-00-00', '00-00-0000', '0.0.0.0', 'nan', 'none', ''}
+    is_pending_assignment = date_series_raw.str.lower().isin({p.lower() for p in placeholders})
+
+    # Mark pending-assignment rows
+    df = df.copy()
+    df['pending_assignment'] = is_pending_assignment
+
+    # Replace known placeholders with NA before parsing so they become NaT
+    df.loc[df['pending_assignment'], date_col] = pd.NA
+
+    # Parse dates (coerce errors to NaT)
     df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
-    
-    # Remove rows with invalid dates
-    invalid_dates = df[date_col].isna().sum()
-    if invalid_dates > 0:
-        st.warning(f"⚠️ Removed {invalid_dates} rows with invalid dates.")
-    
-    df = df[df[date_col].notna()].copy()
-    
+
+    # Rows with NaT that are NOT pending_assignment are truly invalid and will be removed
+    invalid_mask = df[date_col].isna() & (~df['pending_assignment'])
+    invalid_count = invalid_mask.sum()
+    if invalid_count > 0:
+        st.warning(f"⚠️ Removed {invalid_count} rows with invalid/unparseable dates (not placeholders).")
+        # show a sample of invalid rows for debugging
+        try:
+            sample_cols = [c for c in [tracking_col, date_col] if c in df.columns]
+            st.dataframe(df[invalid_mask][sample_cols].head(20), use_container_width=True)
+        except Exception:
+            pass
+        df = df[~invalid_mask].copy()
+
     if len(df) == 0:
-        st.error("❌ No valid data remaining after date filtering.")
+        st.error("❌ No valid data remaining after date parsing.")
         return None, None, None, None, None
-    
-    # Calculate days pending
+
+    # Calculate days_pending only for rows with a valid date
     today = pd.Timestamp(datetime.now().date())
-    df['days_pending'] = (today - df[date_col]).dt.days
-    
+    df['days_pending'] = pd.NA
+    valid_date_mask = df[date_col].notna()
+    df.loc[valid_date_mask, 'days_pending'] = (today - df.loc[valid_date_mask, date_col]).dt.days
+
     # Apply LTP thresholds
-    if model_col:
+    if model_col and model_col in df.columns:
         df['ltp_threshold'] = df[model_col].apply(get_ltp_threshold)
     else:
         df['ltp_threshold'] = LTP_THRESHOLDS['default']
-    
-    # Determine LTP status
-    df['is_ltp'] = df['days_pending'] > df['ltp_threshold']
-    df['ltp_status'] = df['is_ltp'].apply(lambda x: '🚨 LTP' if x else '✅ On Time')
-    
-    # Calculate expected completion date
-    df['ltp_date'] = df.apply(
-        lambda row: row[date_col] + timedelta(days=int(row['ltp_threshold'])), 
+
+    # Determine LTP status:
+    # - Rows with pending_assignment => detailed_status = 'Pending Assignment'
+    # - Rows with valid date => compute normal LTP
+    df['is_ltp'] = False
+    df.loc[valid_date_mask, 'is_ltp'] = df.loc[valid_date_mask, 'days_pending'] > df.loc[valid_date_mask, 'ltp_threshold']
+
+    df['ltp_status'] = df.apply(
+        lambda r: 'Pending Assignment' if r.get('pending_assignment', False)
+        else ('🚨 LTP' if r['is_ltp'] else '✅ On Time'),
         axis=1
     )
-    
-    # Calculate days overdue for LTP items
-    df['days_overdue'] = df.apply(
-        lambda row: max(0, row['days_pending'] - row['ltp_threshold']) if row['is_ltp'] else 0,
+
+    # Calculate expected completion date (LTP deadline) for valid dates
+    df['ltp_deadline'] = pd.NaT
+    df.loc[valid_date_mask, 'ltp_deadline'] = df.loc[valid_date_mask].apply(
+        lambda row: row[date_col] + timedelta(days=int(row['ltp_threshold'])),
         axis=1
     )
-    
+
+    # Days in LTP / days before LTP - only meaningful for rows with valid dates
+    df['days_in_ltp'] = 0
+    df['days_before_ltp'] = 0
+
+    df.loc[valid_date_mask, 'days_in_ltp'] = df.loc[valid_date_mask].apply(
+        lambda row: max(0, int(row['days_pending']) - int(row['ltp_threshold'])) if row['is_ltp'] else 0,
+        axis=1
+    )
+
+    df.loc[valid_date_mask, 'days_before_ltp'] = df.loc[valid_date_mask].apply(
+        lambda row: max(0, int(row['ltp_threshold']) - int(row['days_pending'])) if not row['is_ltp'] else 0,
+        axis=1
+    )
+
+    # Detailed status string
+    def _detailed_status(row):
+        if row.get('pending_assignment', False):
+            return '🟡 Pending Assignment'
+        if row['is_ltp']:
+            return f"🚨 LTP ({int(row['days_in_ltp'])} days overdue)"
+        return f"✅ On Time ({int(row['days_before_ltp'])} days left)"
+
+    df['detailed_status'] = df.apply(_detailed_status, axis=1)
+
     return df, date_col, model_col, tracking_col, status_col
 
 def export_to_excel(df, filename="ltp_report.xlsx"):
@@ -195,9 +307,10 @@ if uploaded_file is not None:
             
             total_appliances = len(df)
             ltp_count = df['is_ltp'].sum()
+            on_time_count = total_appliances - ltp_count
             ltp_percentage = (ltp_count / total_appliances * 100) if total_appliances > 0 else 0
             avg_days = df['days_pending'].mean()
-            max_days_overdue = df['days_overdue'].max() if ltp_count > 0 else 0
+            max_days_in_ltp = df['days_in_ltp'].max() if ltp_count > 0 else 0
             
             with col1:
                 st.metric("🔧 Total Appliances", f"{total_appliances:,}")
@@ -208,13 +321,13 @@ if uploaded_file is not None:
                          delta_color="inverse")
             
             with col3:
-                st.metric("✅ On Time", f"{total_appliances - ltp_count:,}")
+                st.metric("✅ On Time", f"{on_time_count:,}")
             
             with col4:
                 st.metric("⏱️ Avg Days Pending", f"{avg_days:.1f}")
             
             with col5:
-                st.metric("⚠️ Max Days Overdue", f"{int(max_days_overdue)}")
+                st.metric("⚠️ Max Days in LTP", f"{int(max_days_in_ltp)}")
             
             st.markdown("---")
             
@@ -277,14 +390,20 @@ if uploaded_file is not None:
                 st.markdown("---")
                 st.subheader("🔍 Analysis by Model Code")
                 
+                # ensure 'days_in_ltp' exists so aggregation won't fail
+                if 'days_in_ltp' not in df.columns:
+                    df['days_in_ltp'] = 0
+
+                # aggregate by model code (use days_in_ltp instead of missing days_overdue)
                 appliance_analysis = df.groupby(model_col).agg({
                     'is_ltp': ['sum', 'count'],
                     'days_pending': 'mean',
                     'ltp_threshold': 'first',
-                    'days_overdue': 'sum'
+                    'days_in_ltp': 'sum'
                 }).round(1)
-                
-                appliance_analysis.columns = ['LTP Count', 'Total', 'Avg Days Pending', 'LTP Threshold', 'Total Days Overdue']
+
+                # flatten / rename columns to readable names
+                appliance_analysis.columns = ['LTP Count', 'Total', 'Avg Days Pending', 'LTP Threshold', 'Total Days in LTP']
                 appliance_analysis['On Time'] = appliance_analysis['Total'] - appliance_analysis['LTP Count']
                 appliance_analysis['LTP %'] = (appliance_analysis['LTP Count'] / appliance_analysis['Total'] * 100).round(1)
                 appliance_analysis = appliance_analysis.sort_values('LTP Count', ascending=False)
@@ -448,14 +567,22 @@ if uploaded_file is not None:
                 st.markdown("---")
                 st.header("⚠️ LTP Alert Summary")
                 ltp_items = df[df['is_ltp'] == True].copy()
-                ltp_items = ltp_items.sort_values('days_overdue', ascending=False)
+                # sort by computed days in LTP
+                ltp_items = ltp_items.sort_values('days_in_ltp', ascending=False)
                 
+                # ensure final_columns exists (fallback to a sensible default if it was not defined)
+                if 'final_columns' not in locals() and 'final_columns' not in globals():
+                    display_columns = [col for col in df.columns if col not in ['is_ltp', 'ltp_threshold']]
+                    priority_cols = ['detailed_status', 'days_pending', 'days_in_ltp', 'days_before_ltp', 'ltp_deadline']
+                    other_cols = [col for col in display_columns if col not in priority_cols]
+                    final_columns = [c for c in priority_cols if c in df.columns] + other_cols
+
                 st.error(f"🚨 **{ltp_count:,} items are currently in LTP status and require immediate attention!**")
                 
                 # Top overdue items
                 st.subheader("🔴 Most Overdue Items")
                 st.dataframe(
-                    ltp_items[display_columns].head(10),
+                    ltp_items[final_columns].head(10),
                     use_container_width=True
                 )
                 
@@ -481,7 +608,7 @@ else:
        - **Status** (optional) - Current service status
     3. **LTP Thresholds** - Automatically applied based on Model Code:
        - **HA, DTV**: 7 days
-       - **HHP, MTN**: 4 days
+       - **HHP**: 4 days
        - **Other models**: 4 days (default)
     4. **Review the dashboard** to identify LTP items
     5. **Use filters** to focus on specific categories
